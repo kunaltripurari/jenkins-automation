@@ -1,0 +1,143 @@
+import groovy.json.*
+
+@Library('rmi-cicd-library')
+def build
+pipeline{
+    agent {
+        docker {
+            image 'robin/binaries:4.0'
+            registryUrl 'https://docker.artifactory'
+            registryCredentialsId 'b038094e-f70e-4da6-8213-de71268ffb61'
+        }
+    }
+    environment {
+        GITCRED_ID= "ddfd8f48-360e-423c-bac7-108501d4097e"
+    }
+    parameters {
+    string(name: 'appName',
+      defaultValue: 'pr-test',
+      description: 'Specify App name') 
+    string(name: 'TarName',
+      defaultValue: 'process-gui',
+      description: 'Specify tar name')
+    string(name: 'GIT_URL',
+      defaultValue: 'http://github/kunaltripurari.git',
+      description: 'Specify Katana Git URL')      
+    string(name: 'BRANCH_NAME',
+      defaultValue: '',
+      description: 'Specify Branch Name')
+  }
+  
+  options {
+    ansiColor('xterm')
+    buildDiscarder(logRotator(daysToKeepStr: '10', numToKeepStr: '50'))
+  }
+  
+    stages{
+        stage('cleanup'){
+            steps{
+                script{
+                    cleanWs()
+                }
+            }
+            post {
+          failure {
+             script { env.FAILURE_STAGE = 'Clean Workspace' }
+            }
+        }
+        }
+        stage("Helm Chatrs Download"){
+            steps{
+                echo "====++++executing GIT CLONE++++===="
+            script {
+                        dir("${appName}"){
+                        git branch: "${BRANCH_NAME}",
+                        credentialsId: "${GITCRED_ID}",
+                        url: "${GIT_URL}"
+                        sh 'echo "listing Current Directory" && ls -ltrh'
+                        sh '''
+                       ls -ltrh
+                      cp charts/''' +"$TarName"+ '''.tar.gz .
+                      tar xf ''' +"$TarName"+ '''.tar.gz
+                       '''
+                     } 
+                     }               
+            }
+            post {
+          failure {
+             script { env.FAILURE_STAGE = 'Helm Chatrs Download' }
+            }
+        }
+            }
+        stage('deploy helm chart'){
+            steps{
+                script{
+                    withCredentials([usernamePassword(credentialsId: '145e2758-da0a-432b-b096-13039276342b', passwordVariable: 'PASS', usernameVariable: 'USER')]) {
+                    robinLogin.k8sLogin("${clusterip}","${USER}","${PASS}","${tenant}")
+                    dir("${appName}"){
+                    if(helms == "upgrade"){
+                                sh "ls -lart"
+                                sh "kubectl get nodes"
+                                sh "kubectl get ns |grep ${namespace}"
+                                sh "kubectl get po -n ${namespace}"
+                                sh "helm ls --namespace ${namespace}"
+                                sh "helm upgrade --cleanup-on-fail --atomic ${appName} ${WORKSPACE}/${appName}/${TarName} --namespace ${namespace}"
+                                sh "kubectl get po -n ${namespace}"
+                                sh "helm ls --namespace ${namespace}"
+                                //sh "kubectl wait --for=condition=Ready po --selector=app=k8sag -n ${namespace}"
+                            }else if(helms == "create"){
+                                sh "ls -lart"
+                                sh "kubectl get nodes"
+                                sh "kubectl get ns |grep ${namespace}"
+                                sh "kubectl get po -n ${namespace}"
+                                sh "helm ls --namespace ${namespace}"
+                                sh """
+                                if [[ \$(helm status ${appName} --namespace ${namespace} |awk 'FNR==4 {print \$2}') = failed ]]; then  echo "release found" ;else helm --namespace ${namespace} install ${appName} ${WORKSPACE}/${appName}/${TarName}/; fi
+                                
+                                """
+                                sh "kubectl get po -n ${namespace}"
+                                sh "helm ls --namespace ${namespace}"
+                            }else if(helms == "delete"){
+                             sh "ls -lart"
+                             sh "kubectl get nodes"
+                             sh "kubectl get ns |grep ${namespace}"
+                             sh "kubectl get po -n ${namespace}"
+                             sh "helm ls --namespace ${namespace}"
+                             sh "helm status ${appName} --namespace ${namespace}" 
+                             sh "kubectl get all --all-namespaces -l='app.kubernetes.io/instance=${appName}'"
+                             sh "kubectl get po -n ${namespace} | grep ${appName}"
+                             sh "helm ls --namespace ${namespace} | grep ${appName}"
+                             sh "helm uninstall --namespace ${namespace}  ${appName}"
+                    }
+                         
+                    }
+                    }
+                    }
+                    }
+                    post {
+                      failure {
+                        script { env.FAILURE_STAGE = 'Deploy Helm Charts' }
+            }
+        }
+                    }
+        }
+        post {
+success {
+echo "sending success notification..."
+emailext (
+attachLog: true,
+to: 'kunaltripurari@gmail.com',
+subject: "Jenkins Job '${env.JOB_NAME}' succeed",
+body: "Please check http://${env.BUILD_URL.split('/')[2]}/blue/organizations/jenkins/${env.JOB_NAME}/detail/${env.JOB_NAME}/${env.BUILD_NUMBER}/pipeline/ for detailed console logs. \n\n If above URL doesn't work use ${env.BUILD_URL}console."
+)
+}
+failure {
+echo "sending failure notification... FAILURE_STAGE =${env.FAILURE_STAGE} env.BUILD_URL = ${env.BUILD_URL}"
+emailext (
+attachLog: true,
+to: 'kunaL.tripurari@gmail.com',subject: "Jenkins Job '${env.JOB_NAME}' failed at '${env.FAILURE_STAGE}' Stag",body: "Please check http://${env.BUILD_URL.split('/')[2]}/blue/organizations/jenkins/${env.JOB_NAME}/detail/${env.JOB_NAME}/${env.BUILD_NUMBER}/pipeline/ for detailed console logs. \n\n If above URL doesn't work use ${env.BUILD_URL}console."
+)
+}
+}
+    }
+
